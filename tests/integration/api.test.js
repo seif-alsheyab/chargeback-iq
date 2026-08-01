@@ -1,53 +1,34 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../../src/app.js';
-import { pool, closePool } from '../../src/db/pool.js';
+import { closePool } from '../../src/db/pool.js';
+import {
+  seedApiFixtures, cleanupApiFixtures, assertNoTestDataRemains,
+} from '../helpers/apiFixtures.js';
 
 const app = createApp();
-
-// The API talks to the real pool, so these tests commit. Everything created
-// is tracked and removed afterwards, in reverse dependency order.
-const created = { disputes: [], transactions: [], merchants: [], operators: [] };
 
 let merchantId; let transactionId; let operatorId;
 
 beforeAll(async () => {
-  const suffix = Math.random().toString(36).slice(2, 10);
-
-  const { rows: [m] } = await pool.query(
-    `INSERT INTO merchants (name, mid, region) VALUES ($1,$2,'EU') RETURNING id`,
-    ['API Test Merchant', `MID-API-${suffix}`]
-  );
-  merchantId = m.id; created.merchants.push(m.id);
-
-  const { rows: [t] } = await pool.query(
-    `INSERT INTO transactions
-       (merchant_id, processor_code, network_code, processor_transaction_id,
-        amount_minor, currency, occurred_at)
-     VALUES ($1,'STRIPE','VISA',$2,25000,'USD', now() - interval '20 days')
-     RETURNING id`,
-    [merchantId, `tx_api_${suffix}`]
-  );
-  transactionId = t.id; created.transactions.push(t.id);
-
-  const { rows: [o] } = await pool.query(
-    `INSERT INTO operators (email, full_name, role)
-     VALUES ($1,'API Analyst','ANALYST') RETURNING id`,
-    [`api-${suffix}@example.test`]
-  );
-  operatorId = o.id; created.operators.push(o.id);
+  // Clear anything a previous interrupted run left behind, so the suite
+  // starts from a known state rather than inheriting yesterday's mess.
+  await cleanupApiFixtures();
+  const { merchant, transaction, operator } = await seedApiFixtures();
+  merchantId = merchant.id;
+  transactionId = transaction.id;
+  operatorId = operator.id;
 });
 
 afterAll(async () => {
-  for (const id of created.disputes) {
-    await pool.query('DELETE FROM dispute_events WHERE dispute_id = $1', [id]).catch(() => {});
-    await pool.query('DELETE FROM evidence_items WHERE dispute_id = $1', [id]).catch(() => {});
-    await pool.query('DELETE FROM disputes WHERE id = $1', [id]).catch(() => {});
-  }
-  for (const id of created.transactions) await pool.query('DELETE FROM transactions WHERE id = $1', [id]).catch(() => {});
-  for (const id of created.operators)    await pool.query('DELETE FROM operators WHERE id = $1', [id]).catch(() => {});
-  for (const id of created.merchants)    await pool.query('DELETE FROM merchants WHERE id = $1', [id]).catch(() => {});
+  const removed = await cleanupApiFixtures();
+  const remaining = await assertNoTestDataRemains();
   await closePool();
+  // Assert AFTER closing the pool, so a leak fails the suite loudly instead
+  // of hanging the process on an open connection.
+  if (remaining.merchants !== 0 || remaining.operators !== 0) {
+    throw new Error(`cleanup incomplete: ${JSON.stringify(remaining)} (removed ${JSON.stringify(removed)})`);
+  }
 });
 
 describe('health and readiness', () => {
@@ -84,7 +65,6 @@ describe('POST /api/disputes', () => {
     expect(res.body.data.status_code).toBe('CHARGEBACK_RECEIVED');
     // EU merchant -> the 18-day compressed window.
     expect(res.body.data.respond_by).toBe('2026-05-19T00:00:00.000Z');
-    created.disputes.push(res.body.data.id);
   });
 
   it('rejects a malformed body with 400 and field-level detail', async () => {
@@ -125,7 +105,6 @@ describe('dispute lifecycle over HTTP', () => {
     });
     expect(res.status).toBe(201);
     disputeId = res.body.data.id;
-    created.disputes.push(disputeId);
   });
 
   it('tells the client which actions are legal right now', async () => {
