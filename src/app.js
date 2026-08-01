@@ -10,36 +10,35 @@ import { pool } from './db/pool.js';
 import { disputeRouter } from './routes/disputes.js';
 import { complianceRouter } from './routes/compliance.js';
 import { referenceRouter } from './routes/reference.js';
+import { webhookRouter } from './routes/webhooks.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 export function createApp() {
   const app = express();
 
-  // Security headers: disables MIME sniffing, blocks clickjacking, and
-  // removes the header that advertises the framework version.
   app.use(helmet());
 
-  // A body limit is a denial-of-service control. Without it a single request
-  // can allocate unbounded memory.
+  // Webhooks are mounted BEFORE express.json, because the signature covers
+  // the raw bytes. Once a JSON parser has consumed the stream, the original
+  // bytes are gone and the signature can never be recomputed.
+  app.use('/webhooks', webhookRouter);
+
   app.use(express.json({ limit: '256kb' }));
 
-  // Writes are limited more tightly than reads: they cost a transaction and
-  // a row, whereas a read is cheap.
   const writeLimiter = rateLimit({
     windowMs: 60_000, limit: 60,
     standardHeaders: 'draft-7', legacyHeaders: false,
     message: { error: { code: 'RATE_LIMITED', message: 'Too many write requests.' } },
   });
 
-  // Liveness probe. Does NOT touch the database -- a health check that
-  // queries Postgres will report the app dead during a brief DB blip and
-  // trigger a pointless restart.
+  // Liveness: deliberately does NOT touch the database, so a brief DB blip
+  // does not get the container killed and restarted for no reason.
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', uptimeSeconds: Math.floor(process.uptime()) });
   });
 
-  // Readiness probe. This one DOES check the database, because a instance
-  // that cannot reach Postgres should not receive traffic.
+  // Readiness: this one DOES check the database, because an instance that
+  // cannot reach Postgres should not be sent traffic.
   app.get('/ready', async (_req, res) => {
     try {
       await pool.query('SELECT 1');

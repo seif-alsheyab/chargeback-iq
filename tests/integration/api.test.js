@@ -2,31 +2,32 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../../src/app.js';
 import { closePool } from '../../src/db/pool.js';
-import {
-  seedApiFixtures, cleanupApiFixtures, assertNoTestDataRemains,
-} from '../helpers/apiFixtures.js';
+import { scopeFor, seedApiFixtures, cleanupScope, countRemaining } from '../helpers/apiFixtures.js';
 
+// This suite owns APITEST-HTTP and nothing else. The webhook suite owns a
+// different scope, so the two can run in parallel without deleting each
+// other's fixtures.
+const SCOPE = scopeFor('HTTP');
 const app = createApp();
 
 let merchantId; let transactionId; let operatorId;
 
 beforeAll(async () => {
-  // Clear anything a previous interrupted run left behind, so the suite
-  // starts from a known state rather than inheriting yesterday's mess.
-  await cleanupApiFixtures();
-  const { merchant, transaction, operator } = await seedApiFixtures();
+  // Clear anything an interrupted earlier run left in THIS scope.
+  await cleanupScope(SCOPE);
+  const { merchant, transaction, operator } = await seedApiFixtures(SCOPE);
   merchantId = merchant.id;
   transactionId = transaction.id;
   operatorId = operator.id;
 });
 
 afterAll(async () => {
-  const removed = await cleanupApiFixtures();
-  const remaining = await assertNoTestDataRemains();
+  const removed = await cleanupScope(SCOPE);
+  const remaining = await countRemaining(SCOPE);
   await closePool();
-  // Assert AFTER closing the pool, so a leak fails the suite loudly instead
-  // of hanging the process on an open connection.
-  if (remaining.merchants !== 0 || remaining.operators !== 0) {
+  // Assert after closing the pool, so a leak fails loudly instead of
+  // hanging the process on an open connection.
+  if (remaining.merchants !== 0 || remaining.operators !== 0 || remaining.deliveries !== 0) {
     throw new Error(`cleanup incomplete: ${JSON.stringify(remaining)} (removed ${JSON.stringify(removed)})`);
   }
 });
@@ -55,7 +56,7 @@ describe('POST /api/disputes', () => {
   it('opens a dispute and returns 201 with the computed deadline', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const res = await request(app).post('/api/disputes').send({
-      caseNumber: `API-${suffix}`,
+      caseNumber: `${SCOPE}-${suffix}`,
       transactionId,
       reasonCode: '10.4',
       receivedAt: '2026-05-01T00:00:00Z',
@@ -78,7 +79,7 @@ describe('POST /api/disputes', () => {
 
   it('rejects a float amount, because money is stored in minor units', async () => {
     const res = await request(app).post('/api/disputes').send({
-      caseNumber: 'API-FLOAT', transactionId, reasonCode: '10.4',
+      caseNumber: `${SCOPE}-FLOAT`, transactionId, reasonCode: '10.4',
       disputedAmountMinor: 125.55,
     });
     expect(res.status).toBe(400);
@@ -86,7 +87,7 @@ describe('POST /api/disputes', () => {
 
   it('returns 404 for an unknown transaction', async () => {
     const res = await request(app).post('/api/disputes').send({
-      caseNumber: `API-${Math.random().toString(36).slice(2, 8)}`,
+      caseNumber: `${SCOPE}-${Math.random().toString(36).slice(2, 8)}`,
       transactionId: '00000000-0000-0000-0000-000000000000',
       reasonCode: '10.4',
     });
@@ -101,7 +102,7 @@ describe('dispute lifecycle over HTTP', () => {
   it('opens a case', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const res = await request(app).post('/api/disputes').send({
-      caseNumber: `LIFE-${suffix}`, transactionId, reasonCode: '13.1',
+      caseNumber: `${SCOPE}-LIFE-${suffix}`, transactionId, reasonCode: '13.1',
     });
     expect(res.status).toBe(201);
     disputeId = res.body.data.id;
