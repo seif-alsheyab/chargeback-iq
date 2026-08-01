@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.local
+*.local
+coverage/
+dist/
+build/
+*.log
+npm-debug.log*
+.vitest/
+.DS_Store
+.idea/
+.vscode/
+*.pem
+*.key
