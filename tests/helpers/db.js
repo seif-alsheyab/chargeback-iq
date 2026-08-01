@@ -1,9 +1,7 @@
 // Integration test helper.
 //
-// Each test runs inside a transaction that is ALWAYS rolled back. Nothing
-// the tests write ever survives, so tests cannot pollute each other and the
-// database is identical before and after the suite. No cleanup script, no
-// leftover rows, no test that only passes when run first.
+// Each test runs inside a transaction that is ALWAYS rolled back, so nothing
+// written by a test survives it.
 
 import { pool } from '../../src/db/pool.js';
 
@@ -16,6 +14,43 @@ export async function withRollback(fn) {
     await client.query('ROLLBACK');
     client.release();
   }
+}
+
+/**
+ * Make a single client look like a pool, so service code that opens its own
+ * transaction can run inside the test's transaction.
+ *
+ * Postgres has no true nested BEGIN, but it has SAVEPOINTs: a named marker
+ * you can roll back to without ending the outer transaction. So the service's
+ * BEGIN becomes SAVEPOINT, its COMMIT becomes RELEASE SAVEPOINT, and its
+ * ROLLBACK becomes ROLLBACK TO SAVEPOINT. The service is none the wiser, and
+ * the outer ROLLBACK still erases everything.
+ */
+export function asPool(client) {
+  let depth = 0;
+  return {
+    connect: async () => ({
+      query: async (text, params) => {
+        const verb = typeof text === 'string' ? text.trim().toUpperCase() : '';
+        if (verb === 'BEGIN') {
+          depth += 1;
+          return client.query(`SAVEPOINT sp_${depth}`);
+        }
+        if (verb === 'COMMIT') {
+          const d = depth;
+          depth -= 1;
+          return client.query(`RELEASE SAVEPOINT sp_${d}`);
+        }
+        if (verb === 'ROLLBACK') {
+          const d = depth;
+          depth -= 1;
+          return client.query(`ROLLBACK TO SAVEPOINT sp_${d}`);
+        }
+        return client.query(text, params);
+      },
+      release: () => {},
+    }),
+  };
 }
 
 /** Build a merchant + transaction + dispute so a test has something to act on. */
@@ -60,5 +95,32 @@ export async function seedDispute(client, overrides = {}) {
     [`analyst-${suffix}@example.test`]
   );
 
-  return { merchant, txn, reason, dispute, operator };
+  return { merchant, txn, reason, dispute, operator, suffix };
+}
+
+/** A merchant and a bare transaction, for tests that open their own dispute. */
+export async function seedTransaction(client, overrides = {}) {
+  const suffix = Math.random().toString(36).slice(2, 10);
+
+  const { rows: [merchant] } = await client.query(
+    `INSERT INTO merchants (name, mid, region) VALUES ($1,$2,$3) RETURNING *`,
+    ['Test Merchant', `MID-${suffix}`, overrides.region ?? 'EU']
+  );
+
+  const { rows: [txn] } = await client.query(
+    `INSERT INTO transactions
+       (merchant_id, processor_code, network_code, processor_transaction_id,
+        amount_minor, currency, is_card_present, occurred_at)
+     VALUES ($1,$2,$3,$4,$5,'USD',false, now() - interval '30 days')
+     RETURNING *`,
+    [
+      merchant.id,
+      overrides.processorCode ?? 'MYFATOORAH',
+      overrides.networkCode ?? 'VISA',
+      `tx_${suffix}`,
+      overrides.amountMinor ?? 30000,
+    ]
+  );
+
+  return { merchant, txn, suffix };
 }

@@ -41,14 +41,20 @@ export async function findDisputeByCaseNumber(db, caseNumber) {
 }
 
 /**
- * Apply a status change.
+ * Read a dispute and hold a lock on the row until the transaction ends.
  *
- * Note the WHERE clause carries the expected current status. If another
- * process changed the dispute a moment ago, zero rows update and the caller
- * learns the case moved underneath it. Without that guard, two operators
- * clicking at the same time would both "succeed" and the last write would
- * silently win.
+ * FOR UPDATE makes any other transaction wanting the same row wait. Without
+ * it, two operators clicking at the same moment could both read status
+ * UNDER_REVIEW, both decide their move is legal, and both write.
  */
+export async function lockDisputeForUpdate(db, id) {
+  const { rows } = await db.query(
+    `SELECT * FROM disputes WHERE id = $1 FOR UPDATE`,
+    [id]
+  );
+  return rows[0] ?? null;
+}
+
 export async function updateDisputeStatus(db, { id, expectedStatus, toStatus, closedAt = null }) {
   const { rows } = await db.query(
     `UPDATE disputes
@@ -58,6 +64,15 @@ export async function updateDisputeStatus(db, { id, expectedStatus, toStatus, cl
       WHERE id = $1 AND status_code = $2
       RETURNING *`,
     [id, expectedStatus, toStatus, closedAt]
+  );
+  return rows[0] ?? null;
+}
+
+export async function setRootCause(db, { id, rootCause }) {
+  const { rows } = await db.query(
+    `UPDATE disputes SET root_cause = $2, updated_at = now()
+      WHERE id = $1 RETURNING *`,
+    [id, rootCause]
   );
   return rows[0] ?? null;
 }
@@ -77,9 +92,16 @@ export async function appendEvent(db, e) {
   return rows[0];
 }
 
+/**
+ * Event history in true insertion order.
+ *
+ * Ordered by seq, not occurred_at: events written inside one transaction all
+ * carry the same occurred_at, because now() is the transaction start time.
+ * seq is a counter that never ties.
+ */
 export async function listEvents(db, disputeId) {
   const { rows } = await db.query(
-    `SELECT * FROM dispute_events WHERE dispute_id = $1 ORDER BY occurred_at, id`,
+    `SELECT * FROM dispute_events WHERE dispute_id = $1 ORDER BY seq`,
     [disputeId]
   );
   return rows;
@@ -102,6 +124,18 @@ export async function insertEvidence(db, ev) {
   return rows[0];
 }
 
+export async function listEvidence(db, disputeId) {
+  const { rows } = await db.query(
+    `SELECT e.*, k.name AS kind_name
+       FROM evidence_items e
+       JOIN evidence_kinds k ON k.code = e.kind_code
+      WHERE e.dispute_id = $1
+      ORDER BY e.created_at`,
+    [disputeId]
+  );
+  return rows;
+}
+
 /** Open cases, soonest deadline first. This is the operator work queue. */
 export async function listOpenDisputesByDeadline(db, { limit = 50 } = {}) {
   const { rows } = await db.query(
@@ -113,6 +147,18 @@ export async function listOpenDisputesByDeadline(db, { limit = 50 } = {}) {
       ORDER BY d.respond_by ASC
       LIMIT $1`,
     [limit]
+  );
+  return rows;
+}
+
+/** Open cases whose response window has already closed. Input to the sweep. */
+export async function listOverdueOpenDisputes(db, now) {
+  const { rows } = await db.query(
+    `SELECT id, status_code, respond_by
+       FROM disputes
+      WHERE closed_at IS NULL AND respond_by <= $1
+      ORDER BY respond_by ASC`,
+    [now]
   );
   return rows;
 }
