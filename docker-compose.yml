@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chargeback-iq-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chargeback
+      POSTGRES_PASSWORD: chargeback_dev_pw
+      POSTGRES_DB: chargeback_iq
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - chargeback_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chargeback -d chargeback_iq"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  chargeback_pgdata:
