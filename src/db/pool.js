@@ -7,7 +7,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is not set. Copy .env.example to .env.');
@@ -15,20 +15,15 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 10,                       // never hold more than 10 connections
-  idleTimeoutMillis: 30000,      // release a connection idle for 30s
-  connectionTimeoutMillis: 5000, // fail fast if the DB is unreachable
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
-// A connection can die while sitting idle in the pool (DB restart, network
-// drop). Without this listener that surfaces as an unhandled error event
-// and takes the whole Node process down.
 pool.on('error', (err) => {
   console.error('[db] idle client error:', err.message);
 });
 
-// Convenience wrapper so callers write query('SELECT ...', [params])
-// instead of reaching into the pool object every time.
 export function query(text, params) {
   return pool.query(text, params);
 }
