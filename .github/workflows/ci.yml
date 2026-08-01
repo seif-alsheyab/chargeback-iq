@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      # Node 20 is the oldest version package.json engines allows; 22 is what
+      # development runs on. Testing both catches a dependency that quietly
+      # needs a newer runtime than the manifest claims.
+      matrix:
+        node-version: ['20', '22']
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: chargeback
+          POSTGRES_PASSWORD: chargeback_dev_pw
+          POSTGRES_DB: chargeback_iq
+        ports:
+          - 5432:5432
+        # Without a health check the job races the database and fails
+        # intermittently -- the worst kind of CI failure, because it looks
+        # like a flaky test rather than a missing dependency.
+        options: >-
+          --health-cmd "pg_isready -U chargeback -d chargeback_iq"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # CI talks to the service container on 5432. Local development uses
+      # 5433 to avoid colliding with other Postgres instances on the machine.
+      DATABASE_URL: postgres://chargeback:chargeback_dev_pw@localhost:5432/chargeback_iq
+      # Must match what the webhook tests sign with, or every signature check
+      # fails and the suite reports a security bug that does not exist.
+      WEBHOOK_SIGNING_SECRET: ci_test_signing_secret
+      NODE_ENV: test
+      LOG_LEVEL: error
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # npm ci installs exactly what package-lock.json pins, and fails if the
+      # lockfile and manifest disagree. npm install would silently resolve
+      # newer versions and make CI test something different from local.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations
+        run: npm run migrate
+
+      - name: Verify migrations are idempotent
+        run: npm run migrate
+
+      - name: Run test suite
+        run: npm test
+
+      # Running twice proves the suites clean up after themselves. A suite
+      # that only passes on a virgin database is not a suite you can trust.
+      - name: Run test suite again (proves cleanup is repeatable)
+        run: npm test
+
+      - name: Seed demo data
+        run: npm run seed
+
+      - name: Smoke test the running server
+        run: |
+          PORT=4010 node src/server.js &
+          SERVER_PID=$!
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:4010/health >/dev/null && break
+            sleep 1
+          done
+          echo "health : $(curl -s -o /dev/null -w '%{http_code}' http://localhost:4010/health)"
+          echo "ready  : $(curl -s -o /dev/null -w '%{http_code}' http://localhost:4010/ready)"
+          echo "queue  : $(curl -s -o /dev/null -w '%{http_code}' http://localhost:4010/api/disputes/queue)"
+          curl -sf http://localhost:4010/api/disputes/queue | head -c 300
+          kill -TERM $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
