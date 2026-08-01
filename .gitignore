@@ -1,15 +1,38 @@
-node_modules/
+# Environment
 .env
-.env.local
-*.local
-coverage/
-dist/
-build/
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Logs
+logs/
 *.log
-npm-debug.log*
-.vitest/
-.DS_Store
-.idea/
-.vscode/
+
+# Coverage
+coverage/
+
+# Database
+*.sql
+*.dump
+*.sqlite
+*.db
+
+# Secrets
 *.pem
 *.key
+*.crt
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime
+tmp/
+.cache/

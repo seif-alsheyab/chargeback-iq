@@ -1,16 +1,109 @@
 #!/usr/bin/env bash
-# Guard: this repo must only ever carry commits authored by Sief Alsheyab.
-# The machine's global git identity is a different account, so without this
-# hook a missing local config would silently produce unattributed commits.
-EXPECTED="alsheyab.seif@gmail.com"
-ACTUAL="$(git config user.email || true)"
-if [ "$ACTUAL" != "$EXPECTED" ]; then
-  echo "" >&2
-  echo "COMMIT BLOCKED — wrong author identity" >&2
-  echo "  configured : ${ACTUAL:-<unset>}" >&2
-  echo "  expected   : $EXPECTED" >&2
-  echo "  fix        : git config user.email \"$EXPECTED\"" >&2
-  echo "               git config user.name  \"Sief Alsheyab\"" >&2
-  echo "" >&2
-  exit 1
+
+set -euo pipefail
+
+EXPECTED_EMAIL="alsheyab.seif@gmail.com"
+EXPECTED_NAME="Sief Alsheyab"
+
+echo ">> Running pre-commit security checks"
+
+
+#######################################
+# 1. Verify Git identity
+#######################################
+
+ACTUAL_EMAIL="$(git config user.email || true)"
+ACTUAL_NAME="$(git config user.name || true)"
+
+if [ "$ACTUAL_EMAIL" != "$EXPECTED_EMAIL" ]; then
+    echo ""
+    echo "COMMIT BLOCKED — wrong author email" >&2
+    echo "configured : ${ACTUAL_EMAIL:-<unset>}" >&2
+    echo "expected   : $EXPECTED_EMAIL" >&2
+    exit 1
 fi
+
+
+if [ "$ACTUAL_NAME" != "$EXPECTED_NAME" ]; then
+    echo ""
+    echo "COMMIT BLOCKED — wrong author name" >&2
+    echo "configured : ${ACTUAL_NAME:-<unset>}" >&2
+    echo "expected   : $EXPECTED_NAME" >&2
+    exit 1
+fi
+
+
+#######################################
+# 2. Detect staged sensitive files
+#######################################
+
+STAGED_FILES=$(git diff --cached --name-only)
+
+
+if echo "$STAGED_FILES" | grep -Eq \
+'(^|/)(\.env|\.env\..*|credentials|secrets|.*\.pem|.*\.key|.*\.crt)$'
+then
+    echo ""
+    echo "COMMIT BLOCKED — sensitive file detected"
+    echo "$STAGED_FILES"
+    exit 1
+fi
+
+
+#######################################
+# 3. Detect secrets inside staged diff
+#######################################
+
+if git diff --cached | grep -Eiq \
+'(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|password[[:space:]]*=|passwd[[:space:]]*=)'
+then
+    echo ""
+    echo "COMMIT BLOCKED — possible secret detected"
+    echo "Review staged changes."
+    exit 1
+fi
+
+
+#######################################
+# 4. Block database dumps
+#######################################
+
+if echo "$STAGED_FILES" | grep -Eq \
+'\.(sql|dump|sqlite|db)$'
+then
+    echo ""
+    echo "COMMIT BLOCKED — database artifact detected"
+    echo "$STAGED_FILES"
+    exit 1
+fi
+
+
+#######################################
+# 5. Block large files
+#######################################
+
+MAX_SIZE=10485760
+
+while IFS= read -r FILE; do
+
+    [ -f "$FILE" ] || continue
+
+    SIZE=$(stat -c%s "$FILE")
+
+    if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+        echo ""
+        echo "COMMIT BLOCKED — file larger than 10MB"
+        echo "$FILE ($SIZE bytes)"
+        exit 1
+    fi
+
+done <<< "$STAGED_FILES"
+
+
+echo ""
+echo "✓ Git identity verified"
+echo "✓ No secrets detected"
+echo "✓ No sensitive files detected"
+echo "✓ Commit allowed"
+
+exit 0
